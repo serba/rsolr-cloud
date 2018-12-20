@@ -1,19 +1,17 @@
 module RSolr
-  # rubocop:disable Metrics/ClassLength
   module Cloud
     # RSolr connection adapter for SolrCloud
     class Connection < RSolr::Connection
       include MonitorMixin
 
-      ZNODE_LIVE_NODES  = '/live_nodes'.freeze
-      ZNODE_COLLECTIONS = '/collections'.freeze
+      ZNODE_LIVE_NODES = '/live_nodes'.freeze
+      ZNODE_CLUSTER_PROPS = '/clusterprops.json'.freeze
 
       def initialize(zk)
         super()
         @zk = zk
+        init_url_scheme
         init_live_node_watcher
-        init_collections_watcher
-        update_urls
       end
 
       def execute(client, request_context)
@@ -22,7 +20,7 @@ module RSolr
         path  = request_context[:path].to_s
         query = request_context[:query]
         query = query ? "?#{query}" : ''
-        url   = select_node(collection_name, path == 'update')
+        url   = select_node(collection_name)
         raise RSolr::Cloud::Error::NotEnoughNodes unless url
         request_context[:uri] = RSolr::Uri.create(url).merge(path + query)
         super(client, request_context)
@@ -30,108 +28,34 @@ module RSolr
 
       private
 
-      def select_node(collection, leader_only = false)
-        if leader_only
-          synchronize { @leader_urls[collection].to_a.sample }
-        else
-          synchronize { @all_urls[collection].to_a.sample }
+      def init_url_scheme
+        @url_scheme = 'http'
+        if @zk.exists?(ZNODE_CLUSTER_PROPS)
+          json, _stat = @zk.get(ZNODE_CLUSTER_PROPS)
+          props = JSON.parse(json)
+          @url_scheme = props['urlScheme'] || 'http'
         end
+      end
+
+      def select_node(collection)
+        synchronize { @live_nodes.sample + '/' + collection }
       end
 
       def init_live_node_watcher
         @zk.register(ZNODE_LIVE_NODES) do
           update_live_nodes
-          update_urls
         end
         update_live_nodes
       end
 
-      def init_collections_watcher
-        @zk.register(ZNODE_COLLECTIONS) do
-          update_collections
-          update_urls
-        end
-        update_collections
-      end
-
-      def init_collection_state_watcher(collection)
-        @zk.register(collection_state_znode_path(collection)) do
-          update_collection_state(collection)
-          update_urls
-        end
-        update_collection_state(collection)
-      end
-
-      def update_urls
-        synchronize do
-          @all_urls = {}
-          @leader_urls = {}
-          @collections.each do |name, state|
-            # rubocop:disable SpaceAroundOperators
-            @all_urls[name], @leader_urls[name] = available_urls(name, state)
-            # rubocop:enable SpaceAroundOperators
-          end
-        end
-      end
-
       def update_live_nodes
         synchronize do
-          @live_nodes = {}
+          @live_nodes = []
           @zk.children(ZNODE_LIVE_NODES, watch: true).each do |node|
-            @live_nodes[node] = true
+            # "/" between host_and_port part of url and context is replaced with "_" in ZK
+            @live_nodes << @url_scheme + '://' + node.tr('_', '/')
           end
         end
-      end
-
-      def update_collections
-        collections = @zk.children(ZNODE_COLLECTIONS, watch: true)
-        created = []
-        synchronize do
-          @collections ||= {}
-          deleted = @collections.keys - collections
-          created = collections - @collections.keys
-          deleted.each { |collection| @collections.delete(collection) }
-        end
-        created.each { |collection| init_collection_state_watcher(collection) }
-      end
-
-      def update_collection_state(collection)
-        synchronize do
-          collection_state_json, _stat =
-            @zk.get(collection_state_znode_path(collection), watch: true)
-          @collections.merge!(JSON.parse(collection_state_json))
-        end
-      end
-
-      def available_urls(collection_name, collection_state)
-        leader_urls = []
-        all_urls = []
-        all_nodes(collection_state).each do |node|
-          next unless active_node?(node)
-          url = "#{node['base_url']}/#{collection_name}"
-          leader_urls << url if leader_node?(node)
-          all_urls << url
-        end
-        [all_urls, leader_urls]
-      end
-
-      def all_nodes(collection_state)
-        nodes = collection_state['shards'].values.map do |shard|
-          shard['replicas'].values
-        end
-        nodes.flatten
-      end
-
-      def collection_state_znode_path(collection_name)
-        "/collections/#{collection_name}/state.json"
-      end
-
-      def active_node?(node)
-        @live_nodes[node['node_name']] && node['state'] == 'active'
-      end
-
-      def leader_node?(node)
-        node['leader'] == 'true'
       end
     end
   end

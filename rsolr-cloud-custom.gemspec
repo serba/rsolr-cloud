@@ -4,7 +4,7 @@ $LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
 require 'rsolr/cloud/version'
 
 Gem::Specification.new do |spec|
-  spec.name          = 'rsolr-cloud'
+  spec.name          = 'rsolr-cloud-custom'
   spec.version       = Rsolr::Cloud::VERSION
   spec.authors       = ['Shintaro Kimura']
   spec.email         = ['service@enigmo.co.jp']
